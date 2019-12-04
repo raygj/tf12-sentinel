@@ -1,85 +1,104 @@
-# This policy uses the Sentinel tfplan import to require that
-# all EC2 instances have specified tags
+# This policy uses the Sentinel tfplan import to require that all EC2 instances
+# have all mandatory tags.
+
+# Note that the comparison is case-sensitive since AWS tags are case-sensitive.
 
 ##### Imports #####
 
 import "tfplan"
 import "strings"
+import "types"
 
 ##### Functions #####
 
-# Find all resources of a specific type
-# from all modules using the tfplan import
+# Find all resources of a specific type from all modules using the tfplan import
 find_resources_from_plan = func(type) {
 
-  # Start with an empty map
-  resource_maps = {}
+  resources = {}
 
   # Iterate over all modules in the tfplan import
   for tfplan.module_paths as path {
+    # Iterate over the named resources of desired type in the module
+    for tfplan.module(path).resources[type] else {} as name, instances {
+      # Iterate over resource instances
+      for instances as index, r {
 
-    # Append all resources of the specified type to resource_maps
-    # setting the key to the module path. Set the empty map, {}, If the
-    # module does not have any resources of the specified type.
-    if length(path) == 0 {
-      joined_path = ""
-    } else {
-      joined_path = "module." + strings.join(path, ".module.") + "."
+        # Get the address of the instance
+        if length(path) == 0 {
+          # root module
+          address = type + "." + name + "[" + string(index) + "]"
+        } else {
+          # non-root module
+          address = "module." + strings.join(path, ".module.") + "." +
+                    type + "." + name + "[" + string(index) + "]"
+        }
+
+        # Add the instance to resources map, setting the key to the address
+        resources[address] = r
+      }
     }
-    resource_maps[joined_path] = tfplan.module(path).resources[type] else {}
   }
 
-  # return resource_maps
-  return resource_maps
+  return resources
 }
 
-# Get the full address of a resource instance including modules, type,
-# name, and index in form module.<A>.module.<B>.<type>.<name>[<index>]
-# module_path is like module paths returned by tfplan.module_paths
-get_instance_address = func(module_path, type, name, index) {
-  address = module_path + type + "." + name + "[" + string(index) + "]"
-  return address
-}
+# Validate that all instances of specified type have a specified top-level
+# attribute that contains all members of a given list
+validate_attribute_contains_list = func(type, attribute, required_values) {
 
-validate_tags = func(required_tags) {
+  validated = true
 
-   # Initialize validated to true
-   # This will be set to false if there are violations
-   validated = true
+  # Get all resource instances of the specified type
+  resource_instances = find_resources_from_plan(type)
 
-   # Set the resource_type
-   resource_type = "aws_instance"
+  # Loop through the resource instances
+  for resource_instances as address, r {
 
-   # Get all resources of the specified type
-   resource_maps = find_resources_from_plan(resource_type)
+    # Skip resource instances that are being destroyed
+    # to avoid unnecessary policy violations.
+    # Used to be: if length(r.diff) == 0
+    if r.destroy and not r.requires_new {
+      print("Skipping resource", address, "that is being destroyed.")
+      continue
+    }
 
-   # Loop through the module-level resource maps
-   for resource_maps as module_path, resource_map {
-     # Loop through the named resources
-     for resource_map as name, instances {
-       # Loop through resource instances
-       for instances as index, r {
+    # Determine if the attribute is computed
+    # We check "attribute.%" and "attribute.#" because an
+    # attribute of type map or list won't show up in the diff
+    if (r.diff[attribute + ".%"].computed else false) or
+       (r.diff[attribute + ".#"].computed else false) {
+      print("Resource", address, "has attribute", attribute,
+            "that is computed.")
+      # If you want computed values to cause the policy to fail,
+      # uncomment the next line.
+      # validated = false
+    } else {
+      # Validate that the attribute is a list or a map
+      # but first check if r.applied[attribute] exists
+      if r.applied[attribute] else null is not null and
+         (types.type_of(r.applied[attribute]) is "list" or
+          types.type_of(r.applied[attribute]) is "map") {
 
-         # Get address of the instance
-         address = get_instance_address(module_path, resource_type, name, index)
-
-         # Validate that each instance has required tags
-         for required_tags as tag {
-            if r.applied.tags not contains tag {
-            print("EC2 instance", address,
-              "is missing required tag", tag)
-            print("Required tags are:", required_tags)
+        # Evaluate each member of required_values list
+        for required_values as rv {
+          if r.applied[attribute] not contains rv {
+            print("Resource", address, "has attribute", attribute,
+                  "that is missing required value", rv, "from the list:",
+                  required_values)
             validated = false
-         } // end tag check
+          } // end rv
+        } // end required_values
 
-        } // end tag loop
-      } // end resource instances
-    } // end named resources
-  } // end resorce maps
+      } else {
+        print("Resource", address, "is missing attribute", attribute,
+              "or it is not a list or a map")
+        validated = false
+      } // end check that attribute is list or map
 
-  # Return validated
+    } // end computed check
+  } // end resource instances
+
   return validated
-
 }
 
 ### List of mandatory tags ###
@@ -91,9 +110,11 @@ mandatory_tags = [
 
 ### Rules ###
 
-# Call the validation function and assign results
-tags_validated = validate_tags(mandatory_tags)
+# Call the validation function
+tags_validated = validate_attribute_contains_list("aws_instance",
+                 "tags", mandatory_tags)
 
+#Main rule
 main = rule {
-  tags_validated is true
+  tags_validated
 }
