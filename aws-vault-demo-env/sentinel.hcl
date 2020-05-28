@@ -6,5 +6,5 @@ policy "restrict-ec2-instance-type" {
 }
 
 module "tfplan-functions" {
-    source = "./common-functions/tfplan-functions/tfplan-functions.sentinel"
+    source = "./aws-vault-demo-env/common-functions/tfplan-functions/tfplan-functions.sentinel"
 }
